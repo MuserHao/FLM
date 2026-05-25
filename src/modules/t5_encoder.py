@@ -93,10 +93,11 @@ class T5Encoder(nn.Module):
 class RandomEmbeddingEncoder(nn.Module):
     """Frozen random static embedding lookup — Phase-0 control baseline.
 
-    Each token id maps to a fixed random 512-d vector drawn at init time.
-    There is no transformer, no contextualisation, and no trainable parameters.
-    The embedding is L2-normalised then scaled to match the typical T5-small
-    embedding norm (~1.0 before the latent_std=0.2 normalisation in ELF).
+    Each token id maps to a fixed random 512-d vector drawn from N(0, 0.2²)
+    at init time, matching pretrained T5-small's per-dimension std so that
+    both encoders occupy the same scale in ELF's training space after the
+    latent_std=0.2 normalisation.  No transformer, no contextualisation,
+    no trainable parameters.
 
     Why this is the right baseline:
     - Eliminates the "encoder wasn't trained" confound: T5-small's value is

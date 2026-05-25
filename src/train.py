@@ -448,6 +448,14 @@ def run_training(config, *, force_cpu: bool = False):
                     log_for_0(f"Saved checkpoint at epoch {progress:.2f} (step {global_step})")
                     last_save_epoch = progress
 
+            # Clean stop at max_steps: save checkpoint then exit
+            max_steps = getattr(config, "max_steps", -1)
+            if max_steps > 0 and global_step >= max_steps:
+                save_checkpoint(state, config.output_dir, global_step, hf_repo_id=config.hf_repo_id)
+                log_for_0(f"Reached max_steps={max_steps} at step {global_step}. Stopping.")
+                epoch_pbar.close()
+                break
+
         epoch_pbar.close()
         current_epoch = epoch + 1
         state.epoch = current_epoch

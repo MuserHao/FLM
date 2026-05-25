@@ -35,7 +35,8 @@ decoder_p_std: 0.8
 self_cond_prob: 0.5
 
 # Training: 20K steps, 2xA100, global_batch=128 (64 per GPU)
-epochs: 100          # high cap; we stop manually after 20K steps
+epochs: 100          # high cap; max_steps enforces the 20K stop
+max_steps: 20000
 global_batch_size: 128
 blr: 0.001
 weight_decay: 0.0

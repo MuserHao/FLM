@@ -26,7 +26,6 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.t5_encoder import get_encoder
@@ -47,39 +46,45 @@ def get_token_embeddings(encoder, device) -> torch.Tensor:
     return emb
 
 
-def nearest_neighbor_dist(z: torch.Tensor, E: torch.Tensor, batch_size: int = 512) -> torch.Tensor:
+def _sq_dists_chunked(z: torch.Tensor, E: torch.Tensor, z_chunk: int = 2048) -> torch.Tensor:
+    """Squared L2 distances between every z[i] and every E[j], chunked over N.
+
+    Uses the identity ||z-e||² = ||z||² + ||e||² - 2 z·eᵀ to avoid the
+    3D broadcast (N, V, d) that would OOM for N=45K, V=32K, d=512.
+
+    Returns (N, V) float32 on the same device as z.
+    """
+    z_norms = z.pow(2).sum(-1)   # (N,)
+    E_norms = E.pow(2).sum(-1)   # (V,)
+    N, V = z.shape[0], E.shape[0]
+    out = torch.empty(N, V, dtype=z.dtype, device=z.device)
+    for s in range(0, N, z_chunk):
+        zc = z[s : s + z_chunk]                                    # (B, d)
+        out[s : s + z_chunk] = (
+            z_norms[s : s + z_chunk, None]                         # (B, 1)
+            + E_norms[None]                                         # (1, V)
+            - 2.0 * zc @ E.T                                       # (B, V)
+        ).clamp(min=0.0)
+    return out
+
+
+def nearest_neighbor_dist(z: torch.Tensor, E: torch.Tensor) -> torch.Tensor:
     """For each vector in z (N, d), find L2 distance to nearest row in E (V, d).
 
-    Returns shape (N,).  Chunked to avoid OOM on large V.
+    Returns shape (N,).
     """
-    N, d = z.shape
-    V = E.shape[0]
-    dists = torch.full((N,), float("inf"), device=z.device)
-    for start in range(0, V, batch_size):
-        chunk = E[start : start + batch_size]          # (chunk, d)
-        # (N, chunk)
-        diff = z.unsqueeze(1) - chunk.unsqueeze(0)     # broadcast
-        d2 = diff.pow(2).sum(-1)                       # (N, chunk)
-        min_d2, _ = d2.min(dim=1)                      # (N,)
-        dists = torch.minimum(dists, min_d2.sqrt())
-    return dists
+    d2 = _sq_dists_chunked(z, E)   # (N, V)
+    return d2.min(dim=1).values.sqrt()
 
 
-def knn_embeddings(z: torch.Tensor, E: torch.Tensor, k: int = 10, batch_size: int = 512) -> torch.Tensor:
+def knn_embeddings(z: torch.Tensor, E: torch.Tensor, k: int = 10) -> torch.Tensor:
     """Return k nearest token embeddings for each z ∈ (N, d).
 
     Returns shape (N, k, d).
     """
-    N, d = z.shape
-    V = E.shape[0]
-    # Compute full distance matrix in chunks over V
-    all_d2 = torch.zeros(N, V, device=z.device)
-    for start in range(0, V, batch_size):
-        chunk = E[start : start + batch_size]
-        diff = z.unsqueeze(1) - chunk.unsqueeze(0)
-        all_d2[:, start : start + batch_size] = diff.pow(2).sum(-1)
-    topk_idx = all_d2.topk(k, dim=1, largest=False).indices  # (N, k)
-    return E[topk_idx]  # (N, k, d)
+    d2 = _sq_dists_chunked(z, E)                            # (N, V)
+    topk_idx = d2.topk(k, dim=1, largest=False).indices    # (N, k)
+    return E[topk_idx]                                      # (N, k, d)
 
 
 # ── Experiment 1.1: Off-manifold distance delta(t) ──────────────────────────
@@ -231,7 +236,6 @@ def load_sample_sequences(n_samples: int, max_length: int = 64, seed: int = 42) 
     from datasets import load_dataset
     print(f"Loading {n_samples} sequences from OWT...")
     ds = load_dataset("embedded-language-flows/openwebtext-t5", split="train", streaming=True)
-    rng = np.random.default_rng(seed)
     seqs = []
     for ex in ds:
         ids = ex["input_ids"][:max_length]

@@ -90,6 +90,7 @@ class Config:
     adam_b1: float = 0.9
     adam_b2: float = 0.95
     grad_accum_steps: int = 1  # Gradient accumulation steps (optimizer updates every K mini-batches)
+    max_steps: int = -1  # Stop after this many global steps (-1 = run to end of epochs)
     use_bf16: bool = True  # Use CUDA BF16 autocast for training/eval forward passes.
     use_compile: bool = False  # Wrap the eval/sampling model in torch.compile.
     gradient_checkpointing: bool = False  # Save activation memory by recomputing ELF blocks during backward.
