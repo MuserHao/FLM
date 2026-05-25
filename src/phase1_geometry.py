@@ -33,17 +33,24 @@ from modules.t5_encoder import get_encoder
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def get_token_embeddings(encoder, device) -> torch.Tensor:
-    """Extract the token embedding matrix E ∈ R^{V × d} from the encoder."""
-    # T5Encoder: embeddings are in model.shared
-    # RandomEmbeddingEncoder: embeddings are in self.embedding
-    if hasattr(encoder, "model") and hasattr(encoder.model, "shared"):
-        emb = encoder.model.shared.weight.detach().to(device)
-    elif hasattr(encoder, "embedding"):
-        emb = encoder.embedding.weight.detach().to(device)
-    else:
-        raise AttributeError(f"Cannot extract embedding matrix from {type(encoder)}")
-    return emb
+def get_vocab_embedding_matrix(encoder, device) -> torch.Tensor:
+    """Extract the static vocabulary embedding matrix E ∈ R^{V × d}.
+
+    Valid for non-contextual encoders: RandomEmbeddingEncoder and
+    T5TokenEmbedEncoder.  For these, every token maps deterministically to one
+    fixed vector, so the vocab table IS the complete discrete manifold.
+
+    Not valid for T5Encoder: contextual outputs ≠ shared.weight after 6
+    transformer layers.  Use x_flat (training encoder outputs) as the manifold
+    for contextual encoders.
+    """
+    if hasattr(encoder, "embedding"):
+        return encoder.embedding.weight.detach().to(device)
+    raise AttributeError(
+        "get_vocab_embedding_matrix only supports non-contextual encoders "
+        "(RandomEmbeddingEncoder, T5TokenEmbedEncoder). "
+        "For T5Encoder, pass x_flat as the manifold."
+    )
 
 
 def _sq_dists_chunked(z: torch.Tensor, E: torch.Tensor, z_chunk: int = 2048) -> torch.Tensor:
@@ -257,8 +264,14 @@ def load_sample_sequences(n_samples: int, max_length: int = 64, seed: int = 42) 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--encoder", choices=["t5", "random_embedding"], default="t5",
-                   help="'t5' = pretrained T5-small; 'random_embedding' = frozen random lookup")
+    p.add_argument("--encoder",
+                   choices=["t5", "t5_token_embed", "random_embedding"],
+                   default="t5",
+                   help=(
+                       "t5              – pretrained T5-small contextual (Condition A)\n"
+                       "t5_token_embed  – pretrained T5 token embeddings, non-contextual (Condition C)\n"
+                       "random_embedding– frozen random lookup, non-contextual (Condition D)"
+                   ))
     p.add_argument("--n_samples", type=int, default=500)
     p.add_argument("--max_seq_len", type=int, default=64)
     p.add_argument("--k_neighbors", type=int, default=10)
@@ -289,10 +302,6 @@ def main():
         p.requires_grad_(False)
     print(f"Encoder loaded. d_model={enc_cfg.d_model}")
 
-    # Token embedding matrix
-    E = get_token_embeddings(encoder, device)
-    print(f"Token embedding matrix: {E.shape}  (V={E.shape[0]}, d={E.shape[1]})")
-
     # Load sequences and encode
     input_ids, attention_mask = load_sample_sequences(
         args.n_samples, max_length=args.max_seq_len, seed=args.seed
@@ -309,21 +318,41 @@ def main():
     print(f"Valid token embeddings: {x_flat.shape[0]}")
 
     # Normalise by latent_std=0.2 (matching ELF training)
-    x_flat = x_flat / 0.2
+    LATENT_STD = 0.2
+    x_flat = x_flat / LATENT_STD
+
+    # ── Reference manifold E ─────────────────────────────────────────────────
+    # Non-contextual encoders (random_embedding, t5_token_embed): every token
+    #   maps deterministically to one fixed vector, so the vocab table IS the
+    #   complete discrete manifold.
+    # Contextual (t5): outputs depend on context; shared.weight is a different
+    #   subspace.  Approximate the manifold with training encoder outputs x_flat.
+    IS_CONTEXTUAL = (args.encoder == "t5")
+    if IS_CONTEXTUAL:
+        E = x_flat
+        manifold_source = "training_encoder_outputs"
+        print(f"Manifold E: training encoder outputs  shape={E.shape}")
+    else:
+        E = get_vocab_embedding_matrix(encoder, device) / LATENT_STD
+        manifold_source = "vocab_table"
+        print(f"Manifold E: vocab table  shape={E.shape}")
 
     t_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
     results = {
         # ── Experiment metadata (for reproducibility) ──────────────────────
         "encoder": args.encoder,
+        "is_contextual": IS_CONTEXTUAL,
         "n_sequences": args.n_samples,
         "n_token_embeddings": x_flat.shape[0],
+        "manifold_size": E.shape[0],
+        "manifold_source": manifold_source,
         "max_seq_len": args.max_seq_len,
         "k_neighbors": args.k_neighbors,
         "noise_scale": args.noise_scale,
         "n_noise_samples": args.n_noise_samples,
         "n_pairs_curvature": args.n_pairs_curvature,
-        "latent_std": 0.2,
+        "latent_std": LATENT_STD,
         "t_values": t_values,
         "seed": args.seed,
         "device": str(device),
@@ -333,7 +362,7 @@ def main():
     print("\n=== Experiment 1.1: Off-manifold distance δ(t) ===")
     t0 = time.time()
     results["delta_t"] = measure_delta_t(
-        x_flat, E / 0.2,   # normalise E too
+        x_flat, E,
         t_values=t_values,
         noise_scale=args.noise_scale,
         n_noise_samples=args.n_noise_samples,
@@ -344,7 +373,7 @@ def main():
     print("\n=== Experiment 1.2: Conditional variance proxy ===")
     t0 = time.time()
     results["cond_variance"] = measure_cond_variance(
-        x_flat, E / 0.2,
+        x_flat, E,
         t_values=t_values,
         k=args.k_neighbors,
         noise_scale=args.noise_scale,
@@ -356,7 +385,7 @@ def main():
     print("\n=== Experiment 1.3: Manifold curvature proxy κ ===")
     t0 = time.time()
     results["curvature"] = measure_curvature(
-        E / 0.2,
+        E,
         n_pairs=args.n_pairs_curvature,
         n_midpoints=5,
         seed=args.seed,

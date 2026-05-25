@@ -133,33 +133,78 @@ class RandomEmbeddingEncoder(nn.Module):
         return self.embedding(input_ids)
 
 
+class T5TokenEmbedEncoder(nn.Module):
+    """Frozen pretrained T5 token embedding table — non-contextual pretrained baseline.
+
+    2×2 experimental design (Phase 0 / Phase 1):
+                        Pretrained      Not pretrained
+        Contextual    │ T5Encoder      │ (scratch, Phase 2)
+        Non-contextual│ THIS class     │ RandomEmbeddingEncoder
+
+    Uses T5's shared.weight as a static frozen lookup.  No transformer layers,
+    no cross-token attention.  Each token maps to its pretrained embedding
+    regardless of surrounding context.
+
+    Comparison axes this enables:
+      T5TokenEmbedEncoder vs. T5Encoder          → pure contextuality effect
+                                                    (pretraining held constant)
+      T5TokenEmbedEncoder vs. RandomEmbedEncoder → pure pretraining effect
+                                                    (non-contextual held constant)
+    """
+
+    def __init__(self, model_name: str = "t5-small"):
+        super().__init__()
+        from transformers import T5EncoderModel
+        t5 = T5EncoderModel.from_pretrained(model_name)
+        weight = t5.shared.weight.detach().clone()  # (V, d)
+        vocab_size, d_model = weight.shape
+        self.embedding = nn.Embedding(vocab_size, d_model, _weight=weight)
+        for p in self.parameters():
+            p.requires_grad_(False)
+        del t5
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        deterministic: bool = True,
+    ) -> torch.Tensor:
+        return self.embedding(input_ids)  # (B, S, d) — same shape as T5Encoder
+
+
 def get_encoder(model_name: str, dtype: Any, encoder_type: str = "t5"):
     """Return ``(config, encoder_module)``.
 
-    Args:
-        model_name: HuggingFace T5 model name (e.g. ``"t5-small"``).
-            Only used when ``encoder_type="t5"``.
-        dtype: torch dtype for the encoder weights.
-        encoder_type: ``"t5"`` (default, pretrained) or
-            ``"random_embedding"`` (frozen random lookup table, Phase-0 baseline).
+    encoder_type choices (2×2 design):
+      "t5"              – pretrained T5-small contextual encoder (Condition A)
+      "t5_token_embed"  – pretrained T5 token embedding table, non-contextual (Condition C)
+      "random_embedding"– frozen random lookup, non-contextual (Condition D)
     """
     if encoder_type == "random_embedding":
-        log_for_0("Loading RandomEmbeddingEncoder (frozen random lookup, Phase-0 baseline)...")
-        # Use T5-small dimensions so the rest of the model is unchanged
+        log_for_0("Loading RandomEmbeddingEncoder (frozen random lookup, Condition D)...")
         config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
-        model = RandomEmbeddingEncoder(
-            vocab_size=config.vocab_size, d_model=config.d_model,
-        )
+        model = RandomEmbeddingEncoder(vocab_size=config.vocab_size, d_model=config.d_model)
+        if dtype is not None:
+            model = model.to(dtype)
+        return config, model
+
+    if encoder_type == "t5_token_embed":
+        log_for_0(f"Loading T5TokenEmbedEncoder: {model_name} token embeddings only (Condition C)...")
+        config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
+        model = T5TokenEmbedEncoder(model_name=model_name)
         if dtype is not None:
             model = model.to(dtype)
         return config, model
 
     if encoder_type == "t5":
-        log_for_0(f"Loading T5 Encoder: {model_name} (pretrained)...")
+        log_for_0(f"Loading T5 Encoder: {model_name} (pretrained contextual, Condition A)...")
         config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
         model = T5Encoder(config, pretrained=True)
         if dtype is not None:
             model = model.to(dtype)
         return config, model
 
-    raise ValueError(f"Unknown encoder_type: {encoder_type!r}. Choose 't5' or 'random_embedding'.")
+    raise ValueError(
+        f"Unknown encoder_type: {encoder_type!r}. "
+        "Choose 't5', 't5_token_embed', or 'random_embedding'."
+    )
