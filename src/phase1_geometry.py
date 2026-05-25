@@ -91,20 +91,31 @@ def measure_delta_t(
     noise_scale: float = 2.0,
     n_noise_samples: int = 5,
 ) -> dict:
-    """Measure E[dist(z_t, manifold)] for each t."""
+    """Measure E[dist(z_t, manifold)] for each t.
+
+    Saved per t:
+      mean / std   — scalar summaries for quick comparison
+      per_noise_means — list of length n_noise_samples; each entry is the mean
+                        distance across N samples for one noise draw.  Allows
+                        bootstrap CI computation in post-processing.
+    """
     results = {}
     N, d = x.shape
     for t in t_values:
-        dists_all = []
+        per_noise_means = []
+        flat_dists = []
         for _ in range(n_noise_samples):
             eps = torch.randn_like(x)
             z_t = t * x + (1 - t) * eps * noise_scale
             d_t = nearest_neighbor_dist(z_t, E)   # (N,)
-            dists_all.append(d_t.cpu())
-        stacked = torch.stack(dists_all, dim=0)    # (n_noise, N)
+            per_noise_means.append(float(d_t.mean()))
+            flat_dists.append(d_t.cpu())
+        stacked = torch.stack(flat_dists, dim=0)    # (n_noise, N)
         results[t] = {
             "mean": float(stacked.mean()),
             "std":  float(stacked.std()),
+            # per_noise_means: one scalar per noise draw → use for bootstrap CI
+            "per_noise_means": per_noise_means,
         }
         print(f"  δ(t={t:.1f})  mean={results[t]['mean']:.4f}  std={results[t]['std']:.4f}")
     return results
@@ -120,22 +131,35 @@ def measure_cond_variance(
     noise_scale: float = 2.0,
     n_noise_samples: int = 3,
 ) -> dict:
-    """k-NN variance of token embeddings near z_t as proxy for Var[x | z_t]."""
+    """k-NN variance of token embeddings near z_t as proxy for Var[x | z_t].
+
+    Saved per t:
+      mean / std        — scalar summaries
+      per_noise_means   — list of n_noise_samples means for bootstrap CI
+      per_sample_means  — list of N per-sample variances (from the last noise
+                          draw); allows per-token distribution analysis.
+    """
     results = {}
     for t in t_values:
-        vars_all = []
+        per_noise_means = []
+        last_per_sample = None
         for _ in range(n_noise_samples):
             eps = torch.randn_like(x)
             z_t = t * x + (1 - t) * eps * noise_scale
-            # (N, k, d)
-            neighbors = knn_embeddings(z_t, E, k=k)
-            # variance across k neighbors, then mean over d and N
-            var_per_sample = neighbors.var(dim=1).mean(dim=-1)  # (N,)
-            vars_all.append(var_per_sample.cpu())
-        stacked = torch.stack(vars_all, dim=0)
+            neighbors = knn_embeddings(z_t, E, k=k)           # (N, k, d)
+            var_per_sample = neighbors.var(dim=1).mean(dim=-1) # (N,)
+            per_noise_means.append(float(var_per_sample.mean()))
+            last_per_sample = var_per_sample.cpu()
+        all_means = torch.tensor(per_noise_means)
         results[t] = {
-            "mean": float(stacked.mean()),
-            "std":  float(stacked.std()),
+            "mean": float(all_means.mean()),
+            "std":  float(all_means.std()),
+            "per_noise_means": per_noise_means,
+            # Distribution across individual token positions (last noise draw)
+            "per_sample_mean": float(last_per_sample.mean()),
+            "per_sample_std":  float(last_per_sample.std()),
+            "per_sample_p25":  float(last_per_sample.quantile(0.25)),
+            "per_sample_p75":  float(last_per_sample.quantile(0.75)),
         }
         print(f"  Var[x|z_t={t:.1f}]  mean={results[t]['mean']:.4f}  std={results[t]['std']:.4f}")
     return results
@@ -185,10 +209,19 @@ def measure_curvature(
     )
 
     ratio = d_geo / d_euc.clamp(min=1e-8)
-    kappa = float((ratio - 1).mean())
-    kappa_std = float((ratio - 1).std())
+    kappa_vals = (ratio - 1).cpu()
+    kappa = float(kappa_vals.mean())
+    kappa_std = float(kappa_vals.std())
     print(f"  κ = {kappa:.4f} ± {kappa_std:.4f}")
-    return {"kappa_mean": kappa, "kappa_std": kappa_std, "ratio_mean": float(ratio.mean())}
+    return {
+        "kappa_mean": kappa,
+        "kappa_std": kappa_std,
+        "ratio_mean": float(ratio.mean()),
+        "ratio_p25": float(kappa_vals.quantile(0.25)),
+        "ratio_p75": float(kappa_vals.quantile(0.75)),
+        # Per-pair ratios (for histogram / distribution plot)
+        "per_pair_ratios": kappa_vals.tolist(),
+    }
 
 
 # ── Data loading ─────────────────────────────────────────────────────────────
@@ -277,8 +310,18 @@ def main():
     t_values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
     results = {
+        # ── Experiment metadata (for reproducibility) ──────────────────────
         "encoder": args.encoder,
+        "n_sequences": args.n_samples,
         "n_token_embeddings": x_flat.shape[0],
+        "max_seq_len": args.max_seq_len,
+        "k_neighbors": args.k_neighbors,
+        "noise_scale": args.noise_scale,
+        "n_noise_samples": args.n_noise_samples,
+        "n_pairs_curvature": args.n_pairs_curvature,
+        "latent_std": 0.2,
+        "t_values": t_values,
+        "seed": args.seed,
         "device": str(device),
     }
 

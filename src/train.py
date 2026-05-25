@@ -2,6 +2,7 @@
 """Training script for the ELF."""
 
 import argparse
+import csv
 import logging
 import os
 import sys
@@ -274,6 +275,21 @@ def run_training(config, *, force_cpu: bool = False):
 
     os.makedirs(config.output_dir, exist_ok=True)
 
+    # Open a structured CSV for metrics — appended to on every log step so
+    # training can be interrupted and resumed without losing history.
+    metrics_csv_path = os.path.join(config.output_dir, "metrics.csv")
+    metrics_csv_file = None
+    metrics_csv_writer = None
+    if rank == 0:
+        csv_exists = os.path.isfile(metrics_csv_path)
+        metrics_csv_file = open(metrics_csv_path, "a", newline="", buffering=1)
+        metrics_csv_writer = csv.DictWriter(
+            metrics_csv_file,
+            fieldnames=["step", "tokens_processed", "loss", "l2_loss", "ce_loss", "lr"],
+        )
+        if not csv_exists:
+            metrics_csv_writer.writeheader()
+
     if rank == 0:
         config_dict = {
             k: ([vars(sc) for sc in v] if isinstance(v, list) and v and isinstance(v[0], SamplingConfig) else v)
@@ -399,6 +415,16 @@ def run_training(config, *, force_cpu: bool = False):
                         f"l2={avg_l2:.4f}, ce={avg_ce:.4f}, "
                         f"lr={current_lr:.2e}, steps/sec={steps_per_sec:.2f}"
                     )
+                    if metrics_csv_writer is not None:
+                        tokens_processed = global_step * config.global_batch_size * config.max_length
+                        metrics_csv_writer.writerow({
+                            "step": global_step,
+                            "tokens_processed": tokens_processed,
+                            "loss": round(avg_loss, 6),
+                            "l2_loss": round(avg_l2, 6),
+                            "ce_loss": round(avg_ce, 6),
+                            "lr": round(current_lr, 8),
+                        })
                     if config.use_wandb and wandb is not None:
                         current_epoch_progress = epoch + (step_in_epoch + 1) / steps_per_epoch
                         try:
@@ -444,6 +470,9 @@ def run_training(config, *, force_cpu: bool = False):
     log_for_0("=" * 60)
     save_checkpoint(state, config.output_dir, global_step, hf_repo_id=config.hf_repo_id)
     log_for_0(f"Final checkpoint saved to {config.output_dir}")
+    if metrics_csv_file is not None:
+        metrics_csv_file.close()
+        log_for_0(f"Metrics CSV saved to {metrics_csv_path}")
     if config.use_wandb and rank == 0 and wandb is not None:
         wandb.finish()
 
