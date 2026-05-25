@@ -1,0 +1,73 @@
+# Phase 0: ELF-B with RANDOM EMBEDDING encoder — clean control condition
+# Each token ID maps to a fixed random 512-d vector (same dim as T5-small).
+# No transformer, no contextualisation: tests geometric structure, not training.
+# Run: torchrun --nproc_per_node=2 train.py --config configs/training_configs/train_owt_ELF-B_random.yml
+
+# Dataset
+data_path: "embedded-language-flows/openwebtext-t5"
+max_length: 128
+
+# Encoder: random frozen embedding lookup (Phase-0 baseline)
+encoder_model_name: t5-small
+encoder_type: random_embedding
+latent_mean: 0.0
+latent_std: 0.2
+
+# Model (identical to pretrained run)
+model: ELF-B
+bottleneck_dim: 128
+num_time_tokens: 4
+num_self_cond_cfg_tokens: 4
+num_model_mode_tokens: 4
+
+# Denoiser objective
+denoiser_p_mean: -1.5
+denoiser_p_std: 0.8
+denoiser_noise_scale: 2.0
+t_eps: 0.05
+time_schedule: "logit_normal"
+
+# Decoder objective
+decoder_prob: 0.2
+decoder_noise_scale: 5.0
+decoder_p_mean: 0.8
+decoder_p_std: 0.8
+
+# Self-conditioning
+self_cond_prob: 0.5
+
+# Training: identical to pretrained run
+epochs: 100
+global_batch_size: 128
+blr: 0.001
+weight_decay: 0.0
+warmup_steps: 500
+optimizer: muon
+gradient_checkpointing: false
+use_bf16: true
+
+# EMA
+ema_decay1: 0.9999
+
+# Checkpointing
+log_freq: 100
+save_freq: 0.05
+eval_freq: 999
+
+# Sampling
+sampling_configs_path: "configs/sampling_configs/uncond_sampling_configs.yml"
+num_samples: 256
+
+# Output
+output_dir: "outputs/phase0_random"
+hf_repo_id: null
+resume: null
+
+# Wandb
+use_wandb: false
+wandb_project: elf_geometry
+wandb_run_name: phase0_random
+
+# Misc
+seed: 42
+num_workers: 4

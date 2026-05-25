@@ -41,6 +41,9 @@ class Config:
     # Encoder
     encoder_model_name: str = "t5-small"
     encoder_checkpoint: str = None
+    # "t5" = pretrained T5 contextual encoder (default)
+    # "random_embedding" = frozen random static lookup table (Phase-0 baseline)
+    encoder_type: str = "t5"
     latent_mean: float = 0.0
     latent_std: float = 1.0
 

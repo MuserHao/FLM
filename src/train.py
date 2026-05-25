@@ -138,7 +138,8 @@ def run_training(config, *, force_cpu: bool = False):
     train_dataset, eval_dataset = load_dataset(config)
 
     log_for_0(f"Loading Encoder config: {config.encoder_model_name}...")
-    encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
+    encoder_type = getattr(config, "encoder_type", "t5")
+    encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32, encoder_type=encoder_type)
     encoder = encoder.to(device).eval()
     for p in encoder.parameters():
         p.requires_grad_(False)

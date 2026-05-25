@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-"""Frozen T5 text embedder, wrapping `transformers.T5EncoderModel`."""
+"""Frozen T5 text embedder, wrapping `transformers.T5EncoderModel`.
+
+Two encoder modes are supported (controlled by ``encoder_type`` in config):
+  - ``"t5"`` (default): frozen pretrained T5 contextual encoder.
+  - ``"random_embedding"``: frozen random static embedding lookup table with
+    the same vocabulary size and dimension as T5-small.  Each token id maps
+    to a fixed random vector; there is no transformer and no contextualisation.
+    This is the clean Phase-0 baseline: it tests whether pretrained *geometric
+    structure* drives ELF's data efficiency, not whether the encoder was
+    "trained" as a feature extractor.
+"""
 
 from typing import Any, Optional
 
@@ -80,11 +90,72 @@ class T5Encoder(nn.Module):
         return out.last_hidden_state
 
 
-def get_encoder(model_name: str, dtype: Any):
-    """Return `(config, model)`. Weights are downloaded on first use."""
-    log_for_0(f"Loading T5 Encoder: {model_name}...")
-    config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
-    model = T5Encoder(config, pretrained=True)
-    if dtype is not None:
-        model = model.to(dtype)
-    return config, model
+class RandomEmbeddingEncoder(nn.Module):
+    """Frozen random static embedding lookup — Phase-0 control baseline.
+
+    Each token id maps to a fixed random 512-d vector drawn at init time.
+    There is no transformer, no contextualisation, and no trainable parameters.
+    The embedding is L2-normalised then scaled to match the typical T5-small
+    embedding norm (~1.0 before the latent_std=0.2 normalisation in ELF).
+
+    Why this is the right baseline:
+    - Eliminates the "encoder wasn't trained" confound: T5-small's value is
+      its *geometry* (semantic clusters, smooth manifold), not its role as a
+      feature extractor.  A random *contextual* T5 still runs an attention
+      transformer over random weights, which can impose spurious structure
+      or mask the pure-geometry comparison.
+    - Much faster forward pass (single embedding lookup, no transformer).
+    - Directly tests the hypothesis: structured semantic geometry → low
+      conditional variance Var[x|z_t] → better flow-matching data efficiency.
+    """
+
+    def __init__(self, vocab_size: int = 32128, d_model: int = 512, seed: int = 0):
+        super().__init__()
+        gen = torch.Generator().manual_seed(seed)
+        weight = torch.randn(vocab_size, d_model, generator=gen)
+        # Normalise to unit norm then scale to ~1.0 mean norm (matching T5-small)
+        weight = weight / weight.norm(dim=-1, keepdim=True)
+        self.embedding = nn.Embedding(vocab_size, d_model, _weight=weight)
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        deterministic: bool = True,
+    ) -> torch.Tensor:
+        # (B, S) → (B, S, d) — same output shape as T5Encoder
+        return self.embedding(input_ids)
+
+
+def get_encoder(model_name: str, dtype: Any, encoder_type: str = "t5"):
+    """Return ``(config, encoder_module)``.
+
+    Args:
+        model_name: HuggingFace T5 model name (e.g. ``"t5-small"``).
+            Only used when ``encoder_type="t5"``.
+        dtype: torch dtype for the encoder weights.
+        encoder_type: ``"t5"`` (default, pretrained) or
+            ``"random_embedding"`` (frozen random lookup table, Phase-0 baseline).
+    """
+    if encoder_type == "random_embedding":
+        log_for_0("Loading RandomEmbeddingEncoder (frozen random lookup, Phase-0 baseline)...")
+        # Use T5-small dimensions so the rest of the model is unchanged
+        config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
+        model = RandomEmbeddingEncoder(
+            vocab_size=config.vocab_size, d_model=config.d_model,
+        )
+        if dtype is not None:
+            model = model.to(dtype)
+        return config, model
+
+    if encoder_type == "t5":
+        log_for_0(f"Loading T5 Encoder: {model_name} (pretrained)...")
+        config = T5EncoderConfig.from_pretrained(model_name, dtype=dtype)
+        model = T5Encoder(config, pretrained=True)
+        if dtype is not None:
+            model = model.to(dtype)
+        return config, model
+
+    raise ValueError(f"Unknown encoder_type: {encoder_type!r}. Choose 't5' or 'random_embedding'.")
