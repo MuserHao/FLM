@@ -109,12 +109,15 @@ class RandomEmbeddingEncoder(nn.Module):
       conditional variance Var[x|z_t] → better flow-matching data efficiency.
     """
 
-    def __init__(self, vocab_size: int = 32128, d_model: int = 512, seed: int = 0):
+    def __init__(self, vocab_size: int = 32128, d_model: int = 512,
+                 embed_std: float = 0.2, seed: int = 0):
         super().__init__()
         gen = torch.Generator().manual_seed(seed)
-        weight = torch.randn(vocab_size, d_model, generator=gen)
-        # Normalise to unit norm then scale to ~1.0 mean norm (matching T5-small)
-        weight = weight / weight.norm(dim=-1, keepdim=True)
+        # Match pretrained T5-small's per-dimension std (~0.2) so that after
+        # ELF's latent normalisation (divide by latent_std=0.2) both encoders
+        # have std≈1.0 per dimension in the training space.  Unit-norm init
+        # would give std≈0.044 → 5× scale mismatch → unfair noise-to-signal ratio.
+        weight = torch.randn(vocab_size, d_model, generator=gen) * embed_std
         self.embedding = nn.Embedding(vocab_size, d_model, _weight=weight)
         for p in self.parameters():
             p.requires_grad_(False)
